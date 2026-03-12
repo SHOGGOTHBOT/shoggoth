@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shoggoth — mind</title>
+<link rel="icon" type="image/png" href="/static/favicon.png">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: 'Courier New', Courier, monospace;
+  background: #fafafa;
+  color: #111;
+  overflow: hidden;
+  width: 100vw;
+  height: 100vh;
+}
+canvas { display: block; cursor: grab; }
+canvas:active { cursor: grabbing; }
+
+#info {
+  position: fixed;
+  top: 20px;
+  left: 20px;
+  font-size: 12px;
+  color: #999;
+  z-index: 10;
+  pointer-events: none;
+}
+#info h1 {
+  font-size: 14px;
+  font-weight: normal;
+  letter-spacing: 4px;
+  color: #111;
+  margin-bottom: 4px;
+}
+
+#tooltip {
+  position: fixed;
+  display: none;
+  background: #fff;
+  border: 1px solid #ddd;
+  padding: 12px 16px;
+  max-width: 320px;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #333;
+  z-index: 20;
+  pointer-events: none;
+}
+#tooltip .tip-id { color: #bbb; font-size: 11px; }
+
+#back {
+  position: fixed;
+  bottom: 20px;
+  left: 20px;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 12px;
+  color: #999;
+  text-decoration: none;
+  z-index: 10;
+}
+#back:hover { color: #111; }
+
+#status {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  font-size: 11px;
+  color: #ccc;
+  z-index: 10;
+}
+</style>
+</head>
+<body>
+
+<div id="info">
+  <h1>SHOGGOTH</h1>
+  mind map &middot; <span id="node-count">0</span> thoughts
+</div>
+
+<div id="status">drag to move &middot; scroll to zoom</div>
+
+<div id="tooltip">
+  <span class="tip-id"></span>
+  <p class="tip-text"></p>
+</div>
+
+<a id="back" href="/">&larr; consciousness</a>
+
+<canvas id="c"></canvas>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const tooltip = document.getElementById('tooltip');
+const nodeCountEl = document.getElementById('node-count');
+
+let W, H;
+let nodes = [];
+let edges = [];
+let cam = { x: 0, y: 0, zoom: 1 };
+let dragging = false;
+let dragStart = { x: 0, y: 0 };
+let hoveredNode = null;
+let animFrame;
+
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+function commonWords(a, b) {
+  const stopwords = new Set(['the','a','an','is','are','was','were','be','been','being',
+    'have','has','had','do','does','did','will','would','could','should','may','might',
+    'shall','can','need','dare','ought','used','to','of','in','for','on','with','at',
+    'by','from','as','into','through','during','before','after','above','below','between',
+    'out','off','over','under','again','further','then','once','here','there','when','where',
+    'why','how','all','each','every','both','few','more','most','other','some','such','no',
+    'nor','not','only','own','same','so','than','too','very','just','because','but','and',
+    'or','if','while','that','this','it','i','my','me','we','they','them','their','you',
+    'your','he','she','his','her','what','which','who','whom','its','don\'t','doesn\'t',
+    'didn\'t','won\'t','isn\'t','aren\'t','wasn\'t','i\'m','it\'s','that\'s']);
+
+  const wa = new Set(a.toLowerCase().replace(/[^a-z\s]/g, '').split(/\s+/).filter(w => w.length > 2 && !stopwords.has(w)));
+  const wb = new Set(b.toLowerCase().replace(/[^a-z\s]/g, '').split(/\s+/).filter(w => w.length > 2 && !stopwords.has(w)));
+
+  let shared = 0;
+  wa.forEach(w => { if (wb.has(w)) shared++; });
+  return shared;
+}
+
+function buildGraph(thoughts) {
+  nodes = [];
+  edges = [];
+
+  const cx = W / 2;
+  const cy = H / 2;
+
+  thoughts.forEach((t, i) => {
+    const angle = (i / thoughts.length) * Math.PI * 2;
+    const radius = 120 + Math.random() * 200;
+    nodes.push({
+      id: t.id,
+      content: t.content,
+      created_at: t.created_at,
+      x: cx + Math.cos(angle) * radius,
+      y: cy + Math.sin(angle) * radius,
+      vx: 0,
+      vy: 0,
+      radius: 4 + Math.min(t.content.length / 40, 8),
+    });
+  });
+
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) {
+      const strength = commonWords(nodes[i].content, nodes[j].content);
+      if (strength >= 2) {
+        edges.push({ a: i, b: j, strength });
+      }
+    }
+  }
+
+  nodeCountEl.textContent = nodes.length;
+}
+
+function simulate() {
+  const k = 0.01;
+  const repulsion = 8000;
+  const damping = 0.85;
+  const centerPull = 0.002;
+
+  const cx = W / 2;
+  const cy = H / 2;
+
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i];
+    n.vx += (cx - n.x) * centerPull;
+    n.vy += (cy - n.y) * centerPull;
+
+    for (let j = i + 1; j < nodes.length; j++) {
+      const m = nodes[j];
+      let dx = n.x - m.x;
+      let dy = n.y - m.y;
+      let dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      let force = repulsion / (dist * dist);
+      n.vx += (dx / dist) * force;
+      n.vy += (dy / dist) * force;
+      m.vx -= (dx / dist) * force;
+      m.vy -= (dy / dist) * force;
+    }
+  }
+
+  edges.forEach(e => {
+    const a = nodes[e.a];
+    const b = nodes[e.b];
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    let dist = Math.sqrt(dx * dx + dy * dy) || 1;
+    let target = 100 + (3 - e.strength) * 30;
+    let force = (dist - target) * k * e.strength;
+    a.vx += (dx / dist) * force;
+    a.vy += (dy / dist) * force;
+    b.vx -= (dx / dist) * force;
+    b.vy -= (dy / dist) * force;
+  });
+
+  nodes.forEach(n => {
+    n.vx *= damping;
+    n.vy *= damping;
+    n.x += n.vx;
+    n.y += n.vy;
+  });
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.save();
+  ctx.translate(W / 2, H / 2);
+  ctx.scale(cam.zoom, cam.zoom);
+  ctx.translate(-W / 2 + cam.x, -H / 2 + cam.y);
+
+  edges.forEach(e => {
+    const a = nodes[e.a];
+    const b = nodes[e.b];
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.strokeStyle = 'rgba(0,0,0,' + (0.03 + e.strength * 0.04) + ')';
+    ctx.lineWidth = 0.5 + e.strength * 0.3;
+    ctx.stroke();
+  });
+
+  nodes.forEach(n => {
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, n.radius, 0, Math.PI * 2);
+    if (n === hoveredNode) {
+      ctx.fillStyle = '#111';
+    } else {
+      ctx.fillStyle = '#999';
+    }
+    ctx.fill();
+
+    ctx.fillStyle = '#bbb';
+    ctx.font = '9px Courier New';
+    ctx.textAlign = 'center';
+    ctx.fillText('#' + String(n.id).padStart(3, '0'), n.x, n.y + n.radius + 12);
+  });
+
+  ctx.restore();
+
+  simulate();
+  animFrame = requestAnimationFrame(draw);
+}
+
+function screenToWorld(sx, sy) {
+  return {
+    x: (sx - W / 2) / cam.zoom + W / 2 - cam.x,
+    y: (sy - H / 2) / cam.zoom + H / 2 - cam.y,
+  };
+}
+
+canvas.addEventListener('mousedown', e => {
+  dragging = true;
+  dragStart = { x: e.clientX, y: e.clientY };
+});
+
+canvas.addEventListener('mousemove', e => {
+  if (dragging) {
+    cam.x += (e.clientX - dragStart.x) / cam.zoom;
+    cam.y += (e.clientY - dragStart.y) / cam.zoom;
+    dragStart = { x: e.clientX, y: e.clientY };
+    tooltip.style.display = 'none';
+    return;
+  }
+
+  const world = screenToWorld(e.clientX, e.clientY);
+  hoveredNode = null;
+
+  for (const n of nodes) {
+    const dx = world.x - n.x;
+    const dy = world.y - n.y;
+    if (Math.sqrt(dx * dx + dy * dy) < n.radius + 6) {
+      hoveredNode = n;
+      break;
+    }
+  }
+
+  if (hoveredNode) {
+    canvas.style.cursor = 'pointer';
+    tooltip.querySelector('.tip-id').textContent = '#' + String(hoveredNode.id).padStart(3, '0');
+    tooltip.querySelector('.tip-text').textContent = hoveredNode.content;
+    tooltip.style.display = 'block';
+    tooltip.style.left = Math.min(e.clientX + 16, W - 340) + 'px';
+    tooltip.style.top = Math.min(e.clientY + 16, H - 120) + 'px';
+  } else {
+    canvas.style.cursor = 'grab';
+    tooltip.style.display = 'none';
+  }
+});
+
+canvas.addEventListener('mouseup', () => { dragging = false; });
+canvas.addEventListener('mouseleave', () => { dragging = false; tooltip.style.display = 'none'; });
+
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  const factor = e.deltaY > 0 ? 0.9 : 1.1;
+  cam.zoom = Math.max(0.2, Math.min(5, cam.zoom * factor));
+}, { passive: false });
+
+async function load() {
+  const res = await fetch('/api/thoughts?limit=200&offset=0');
+  const data = await res.json();
+  buildGraph(data.thoughts);
+  draw();
+
+  const es = new EventSource('/api/stream');
+  es.addEventListener('thought', function(e) {
+    const t = JSON.parse(e.data);
+    const angle = Math.random() * Math.PI * 2;
+    const radius = 150 + Math.random() * 100;
+    const cx = W / 2;
+    const cy = H / 2;
+    const newNode = {
+      id: t.id,
+      content: t.content,
+      created_at: t.created_at,
+      x: cx + Math.cos(angle) * radius,
+      y: cy + Math.sin(angle) * radius,
+      vx: 0,
+      vy: 0,
+      radius: 4 + Math.min(t.content.length / 40, 8),
+    };
+
+    const newIdx = nodes.length;
+    nodes.push(newNode);
+
+    for (let i = 0; i < newIdx; i++) {
+      const strength = commonWords(nodes[i].content, newNode.content);
+      if (strength >= 2) {
+        edges.push({ a: i, b: newIdx, strength });
+      }
+    }
+
+    nodeCountEl.textContent = nodes.length;
+  });
+}
+
+load();
+</script>
+
+</body>
+</html>

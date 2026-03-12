@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+openai
+tweepy
+sse-starlette
+aiosqlite
+jinja2
+python-dotenv
